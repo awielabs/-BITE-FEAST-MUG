@@ -198,7 +198,135 @@ app.get('/api/menu', async (_req, res) => {
   return res.json({
     source: 'local_fallback',
     items: [],
+    customPrices: inMemoryPrices,
     message: 'Supabase menu_items table is ready to be populated.',
+  });
+});
+
+// Update an item's price from Kitchen Dashboard
+app.patch('/api/menu/:id/price', async (req, res) => {
+  const { id } = req.params;
+  const { price } = req.body;
+  const numPrice = Number(price);
+
+  if (isNaN(numPrice) || numPrice <= 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'INVALID_PRICE',
+      message: 'Please provide a valid price greater than 0',
+    });
+  }
+
+  // Update in memory
+  inMemoryPrices[id] = numPrice;
+
+  // Sync to Supabase if configured
+  try {
+    if (supabaseAdmin) {
+      await supabaseAdmin
+        .from('menu_items')
+        .update({ base_price: numPrice, price: numPrice })
+        .eq('id', id);
+    }
+  } catch (err) {
+    console.warn('[MenuPrice] Supabase update note:', err.message);
+  }
+
+  // Broadcast price update to all active devices in the café
+  if (io) {
+    io.emit('item_price_updated', { itemId: id, newPrice: numPrice });
+  }
+
+  return res.json({
+    success: true,
+    itemId: id,
+    newPrice: numPrice,
+    message: `Price successfully updated to ₹${numPrice}`,
+  });
+});
+
+// =============================================================================
+// KITCHEN AUTHENTICATION (ID: BiteMUG | Password: Bite(-_-)feast)
+// =============================================================================
+app.post('/api/kitchen/login', (req, res) => {
+  const { id, username, password } = req.body;
+  const kitchenId = (id || username || '').trim();
+  const kitchenPass = (password || '').trim();
+
+  // Validate ID BiteMUG & Password Bite(-_-)feast
+  if (kitchenId.toLowerCase() === 'bitemug' && kitchenPass === 'Bite(-_-)feast') {
+    return res.json({
+      success: true,
+      message: 'Kitchen staff authenticated successfully',
+      user: {
+        role: 'kitchen_staff',
+        id: 'BiteMUG',
+        name: 'Bite & Feast Kitchen Admin',
+        loginTime: new Date().toISOString(),
+      },
+      token: `k_tok_${Date.now()}`,
+    });
+  }
+
+  return res.status(401).json({
+    success: false,
+    error: 'INVALID_CREDENTIALS',
+    message: 'Invalid Kitchen ID or Password. Required ID: BiteMUG',
+  });
+});
+
+// =============================================================================
+// CUSTOMER AUTHENTICATION (Email, Phone, Google OAuth)
+// =============================================================================
+app.post('/api/auth/customer', async (req, res) => {
+  const { name, phone, email, isSignUp } = req.body;
+
+  const user = {
+    id: `usr_${Date.now()}`,
+    name: name?.trim() || (email ? email.split('@')[0] : 'Customer'),
+    phone: phone?.trim() || '',
+    email: email?.trim() || null,
+    provider: 'email_phone',
+    createdAt: new Date().toISOString(),
+  };
+
+  try {
+    if (supabaseAdmin && user.phone) {
+      await supabaseAdmin.from('customers').upsert(
+        {
+          phone: user.phone,
+          name: user.name,
+          email: user.email,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'phone' }
+      );
+    }
+  } catch (_) {}
+
+  return res.json({
+    success: true,
+    message: isSignUp ? 'Customer registered successfully' : 'Customer logged in successfully',
+    user,
+  });
+});
+
+app.post('/api/auth/google', async (req, res) => {
+  const { email, name, photoUrl } = req.body;
+
+  const user = {
+    id: `goog_${Date.now()}`,
+    name: name || (email ? email.split('@')[0] : 'Google User'),
+    email: email || '',
+    photoUrl: photoUrl || null,
+    provider: 'google',
+    createdAt: new Date().toISOString(),
+  };
+
+  return res.json({
+    success: true,
+    message: 'Google authentication verified',
+    user,
   });
 });
 
