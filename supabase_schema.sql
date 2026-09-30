@@ -17,15 +17,19 @@ CREATE TABLE IF NOT EXISTS public.store_settings (
     opening_time TEXT NOT NULL DEFAULT '8:00 AM',
     closing_time TEXT NOT NULL DEFAULT '10:00 PM',
     message TEXT DEFAULT 'Shop is open and accepting orders',
+    enable_online_payment BOOLEAN NOT NULL DEFAULT true,
+    enable_counter_payment BOOLEAN NOT NULL DEFAULT true,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
 -- Seed initial store status
-INSERT INTO public.store_settings (id, is_open, opening_time, closing_time, message)
-VALUES ('store_status', true, '8:00 AM', '10:00 PM', 'Bite & Feast Mug is open for orders')
+INSERT INTO public.store_settings (id, is_open, opening_time, closing_time, message, enable_online_payment, enable_counter_payment)
+VALUES ('store_status', true, '8:00 AM', '10:00 PM', 'Bite & Feast Mug is open for orders', true, true)
 ON CONFLICT (id) DO UPDATE SET
     opening_time = EXCLUDED.opening_time,
-    closing_time = EXCLUDED.closing_time;
+    closing_time = EXCLUDED.closing_time,
+    enable_online_payment = EXCLUDED.enable_online_payment,
+    enable_counter_payment = EXCLUDED.enable_counter_payment;
 
 -- =============================================================================
 -- 2. CUSTOMERS TABLE (Sign-ups via Name, Phone, Email & Google OAuth)

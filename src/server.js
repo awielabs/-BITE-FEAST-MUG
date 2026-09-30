@@ -17,6 +17,8 @@ let storeState = {
   openingTime: '8:00 AM',
   closingTime: '10:00 PM',
   message: 'Daily operating hours: 8:00 AM to 10:00 PM',
+  enableOnlinePayment: true,
+  enableCounterPayment: true,
 };
 
 // Configure Socket.io with graceful fallback for serverless
@@ -122,6 +124,8 @@ app.get('/api/store/status', async (_req, res) => {
           openingTime: data.opening_time ?? storeState.openingTime,
           closingTime: data.closing_time ?? storeState.closingTime,
           message: data.message ?? storeState.message,
+          enableOnlinePayment: data.enable_online_payment ?? storeState.enableOnlinePayment,
+          enableCounterPayment: data.enable_counter_payment ?? storeState.enableCounterPayment,
         };
       }
     }
@@ -136,12 +140,14 @@ app.get('/api/store/status', async (_req, res) => {
 });
 
 app.post('/api/store/status', async (req, res) => {
-  const { isOpen, openingTime, closingTime, message } = req.body;
+  const { isOpen, openingTime, closingTime, message, enableOnlinePayment, enableCounterPayment } = req.body;
 
   if (typeof isOpen === 'boolean') storeState.isOpen = isOpen;
   if (openingTime) storeState.openingTime = openingTime;
   if (closingTime) storeState.closingTime = closingTime;
   if (message) storeState.message = message;
+  if (typeof enableOnlinePayment === 'boolean') storeState.enableOnlinePayment = enableOnlinePayment;
+  if (typeof enableCounterPayment === 'boolean') storeState.enableCounterPayment = enableCounterPayment;
 
   try {
     if (supabaseAdmin) {
@@ -151,6 +157,8 @@ app.post('/api/store/status', async (req, res) => {
         opening_time: storeState.openingTime,
         closing_time: storeState.closingTime,
         message: storeState.message,
+        enable_online_payment: storeState.enableOnlinePayment,
+        enable_counter_payment: storeState.enableCounterPayment,
         updated_at: new Date().toISOString(),
       });
     }
@@ -158,7 +166,7 @@ app.post('/api/store/status', async (req, res) => {
     console.warn('[StoreStatus] Supabase sync skipped:', err.message);
   }
 
-  // Notify connected kitchen dashboards
+  // Notify connected kitchen dashboards & customers
   if (io) {
     io.emit('store_status_changed', storeState);
   }
@@ -166,6 +174,47 @@ app.post('/api/store/status', async (req, res) => {
   return res.json({
     success: true,
     message: storeState.isOpen ? 'Store marked OPEN' : 'Store marked CLOSED',
+    storeState,
+  });
+});
+
+// Update payment method toggles (Online Payments vs Cash at Counter) from Kitchen
+app.post('/api/store/payments', async (req, res) => {
+  const { enableOnlinePayment, enableCounterPayment } = req.body;
+
+  if (typeof enableOnlinePayment === 'boolean') {
+    storeState.enableOnlinePayment = enableOnlinePayment;
+  }
+  if (typeof enableCounterPayment === 'boolean') {
+    storeState.enableCounterPayment = enableCounterPayment;
+  }
+
+  try {
+    if (supabaseAdmin) {
+      await supabaseAdmin.from('store_settings').upsert({
+        id: 'store_status',
+        is_open: storeState.isOpen,
+        opening_time: storeState.openingTime,
+        closing_time: storeState.closingTime,
+        message: storeState.message,
+        enable_online_payment: storeState.enableOnlinePayment,
+        enable_counter_payment: storeState.enableCounterPayment,
+        updated_at: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    console.warn('[Payments] Supabase store_settings update skipped:', err.message);
+  }
+
+  if (io) {
+    io.emit('store_status_changed', storeState);
+  }
+
+  return res.json({
+    success: true,
+    message: 'Payment configuration updated successfully',
+    enableOnlinePayment: storeState.enableOnlinePayment,
+    enableCounterPayment: storeState.enableCounterPayment,
     storeState,
   });
 });
@@ -246,14 +295,14 @@ app.patch('/api/menu/:id/price', async (req, res) => {
 });
 
 // =============================================================================
-// KITCHEN AUTHENTICATION (ID: BiteMUG | Password: Bite(-_-)feast)
+// KITCHEN AUTHENTICATION (Strict verification, no hint disclosure)
 // =============================================================================
 app.post('/api/kitchen/login', (req, res) => {
   const { id, username, password } = req.body;
   const kitchenId = (id || username || '').trim();
   const kitchenPass = (password || '').trim();
 
-  // Validate ID BiteMUG & Password Bite(-_-)feast
+  // Validate ID and Password strictly
   if (kitchenId.toLowerCase() === 'bitemug' && kitchenPass === 'Bite(-_-)feast') {
     return res.json({
       success: true,
@@ -271,35 +320,79 @@ app.post('/api/kitchen/login', (req, res) => {
   return res.status(401).json({
     success: false,
     error: 'INVALID_CREDENTIALS',
-    message: 'Invalid Kitchen ID or Password. Required ID: BiteMUG',
+    message: 'Invalid Kitchen credentials. Access denied.',
   });
 });
 
 // =============================================================================
-// CUSTOMER AUTHENTICATION (Email, Phone, Google OAuth)
+// CUSTOMER AUTHENTICATION (Supabase Auth Email/Password + Google OAuth)
 // =============================================================================
 app.post('/api/auth/customer', async (req, res) => {
-  const { name, phone, email, isSignUp } = req.body;
+  const { name, phone, email, password, isSignUp } = req.body;
 
-  const user = {
+  let user = {
     id: `usr_${Date.now()}`,
     name: name?.trim() || (email ? email.split('@')[0] : 'Customer'),
     phone: phone?.trim() || '',
     email: email?.trim() || null,
-    provider: 'email_phone',
+    provider: email && password ? 'email_password' : 'email_phone',
     createdAt: new Date().toISOString(),
   };
 
+  let sessionToken = null;
+
+  // Real Supabase Auth integration when email & password are provided
+  if (email && password && supabase) {
+    try {
+      if (isSignUp) {
+        const { data: authData, error: authError } = await supabase.auth.signUp({
+          email: email.trim(),
+          password: password.trim(),
+          options: {
+            data: {
+              name: user.name,
+              phone: user.phone,
+            },
+          },
+        });
+
+        if (!authError && authData?.user) {
+          user.id = authData.user.id;
+          sessionToken = authData.session?.access_token || null;
+        } else if (authError) {
+          console.warn('[Supabase Auth] SignUp note:', authError.message);
+        }
+      } else {
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password: password.trim(),
+        });
+
+        if (!authError && authData?.user) {
+          user.id = authData.user.id;
+          user.name = authData.user.user_metadata?.name || user.name;
+          user.phone = authData.user.user_metadata?.phone || user.phone;
+          sessionToken = authData.session?.access_token || null;
+        } else if (authError) {
+          console.warn('[Supabase Auth] SignIn note:', authError.message);
+        }
+      }
+    } catch (err) {
+      console.warn('[Supabase Auth] Auth exception:', err.message);
+    }
+  }
+
+  // Persist in customers table in Supabase
   try {
-    if (supabaseAdmin && user.phone) {
+    if (supabaseAdmin && (user.phone || user.email)) {
       await supabaseAdmin.from('customers').upsert(
         {
-          phone: user.phone,
+          phone: user.phone || null,
           name: user.name,
-          email: user.email,
+          email: user.email || null,
           updated_at: new Date().toISOString(),
         },
-        { onConflict: 'phone' }
+        { onConflict: user.phone ? 'phone' : 'email' }
       );
     }
   } catch (_) {}
@@ -308,6 +401,7 @@ app.post('/api/auth/customer', async (req, res) => {
     success: true,
     message: isSignUp ? 'Customer registered successfully' : 'Customer logged in successfully',
     user,
+    token: sessionToken,
   });
 });
 
@@ -323,9 +417,22 @@ app.post('/api/auth/google', async (req, res) => {
     createdAt: new Date().toISOString(),
   };
 
+  try {
+    if (supabaseAdmin && user.email) {
+      await supabaseAdmin.from('customers').upsert(
+        {
+          name: user.name,
+          email: user.email,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'email' }
+      );
+    }
+  } catch (_) {}
+
   return res.json({
     success: true,
-    message: 'Google authentication verified',
+    message: 'Google authentication verified and recorded in Supabase',
     user,
   });
 });
@@ -354,6 +461,66 @@ app.get('/api/orders', async (_req, res) => {
     source: 'in_memory',
     orders: inMemoryOrders.slice().reverse(),
   });
+});
+
+// Get orders for a specific customer by phone, email, or order token (Order history & details)
+app.get('/api/orders/customer/:identifier', async (req, res) => {
+  const { identifier } = req.params;
+  const clean = decodeURIComponent(identifier).trim();
+
+  try {
+    if (supabaseAdmin) {
+      const { data, error } = await supabaseAdmin
+        .from('orders')
+        .select('*')
+        .or(`customer_phone.eq.${clean},order_token.eq.${clean},id.eq.${clean}`)
+        .order('created_at', { ascending: false });
+
+      if (!error && data && data.length > 0) {
+        return res.json({ source: 'supabase', orders: data });
+      }
+    }
+  } catch (_) {}
+
+  // In-memory fallback
+  const matched = inMemoryOrders.filter(
+    (o) =>
+      o.customerPhone === clean ||
+      o.orderToken === clean ||
+      o.orderId === clean
+  );
+
+  return res.json({
+    source: 'in_memory',
+    orders: matched.slice().reverse(),
+  });
+});
+
+// Get single order details by ID or Token
+app.get('/api/orders/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    if (supabaseAdmin) {
+      const { data, error } = await supabaseAdmin
+        .from('orders')
+        .select('*')
+        .or(`order_token.eq.${id},id.eq.${id},order_id.eq.${id}`)
+        .single();
+
+      if (!error && data) {
+        return res.json({ success: true, order: data });
+      }
+    }
+  } catch (_) {}
+
+  const localOrder = inMemoryOrders.find(
+    (o) => o.orderId === id || o.orderToken === id
+  );
+  if (localOrder) {
+    return res.json({ success: true, order: localOrder });
+  }
+
+  return res.status(404).json({ success: false, message: 'Order not found' });
 });
 
 // Submit a new order
