@@ -628,7 +628,7 @@ app.patch('/api/orders/:id/status', async (req, res) => {
       await supabaseAdmin
         .from('orders')
         .update({ order_status: status, updated_at: new Date().toISOString() })
-        .or(`order_id.eq.${id},order_token.eq.${id}`);
+        .or(`id.eq.${id},order_id.eq.${id},order_token.eq.${id}`);
     }
   } catch (_) {}
 
